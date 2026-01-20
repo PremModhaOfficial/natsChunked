@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"os"
+	"sync"
 	"time"
 
-	"natsChunked/pkg/chunker"
+	"natsChunked/pkg/chunks"
 
 	"github.com/nats-io/nats.go"
 )
@@ -19,43 +19,39 @@ func main() {
 	}
 	defer nc.Close()
 
-	data, err := os.ReadFile("./resources/8Mb.html")
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	var wg sync.WaitGroup
+	var received []byte
+
+	wg.Add(1)
+	asm := chunks.NewAssembler(nc, 30*time.Second, func(id string, d []byte) {
+		received = d
+		fmt.Printf("Received message %s: %d bytes\n", id, len(d))
+		wg.Done()
+	})
+	defer asm.Close()
+
+	sub, err := asm.Subscribe("demo.chunks")
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer sub.Unsubscribe()
 
-	sender := chunker.NewSender(nc, 512*1024)
-	receiver := chunker.NewReceiver(nc)
-
-	subject := "test.chunked"
-	done := make(chan []byte)
-
-	go func() {
-		received, err := receiver.Receive(subject, 30*time.Second)
-		if err != nil {
-			log.Printf("Receive error: %v", err)
-			done <- nil
-			return
-		}
-		done <- received
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-
-	if err := sender.Send(subject, data); err != nil {
+	pub := chunks.NewPublisher(nc, 512*1024, chunks.WithDigest())
+	id, err := pub.PublishBytes("demo.chunks", data)
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Sent %d bytes\n", len(data))
+	fmt.Printf("Published message %s: %d bytes\n", id, len(data))
 
-	received := <-done
-	if received == nil {
-		log.Fatal("Failed to receive")
-	}
-
-	fmt.Printf("Received %d bytes\n", len(received))
+	wg.Wait()
 
 	if bytes.Equal(data, received) {
-		fmt.Println("OK")
+		fmt.Println("OK - data matches")
 	} else {
 		fmt.Println("MISMATCH")
 	}
