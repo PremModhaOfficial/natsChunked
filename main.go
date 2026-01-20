@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
 	"time"
+
+	"natsChunked/pkg/chunker"
 
 	"github.com/nats-io/nats.go"
 )
@@ -16,33 +19,44 @@ func main() {
 	}
 	defer nc.Close()
 
-	bytes, err := os.ReadFile("./resources/8Mb.html")
-	if err != nil {
-		panic(err)
-	}
-
-	sender := NewChunkedSender(nc, 1*1024*1024)
-
-	result, err := sender.Send("subject.a", bytes)
+	data, err := os.ReadFile("./resources/8Mb.html")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("Sent %d bytes in %d parts (chunk size: %d) - took %v\n",
-		result.DataSize, result.TotalParts, result.ChunkSize, result.Duration)
+	sender := chunker.NewSender(nc, 512*1024)
+	receiver := chunker.NewReceiver(nc)
 
-	receiver := NewChunkedReceiver(nc)
+	subject := "test.chunked"
+	done := make(chan []byte)
 
 	go func() {
-		recvResult, err := receiver.Receive("subject.a", 30*time.Second)
+		received, err := receiver.Receive(subject, 30*time.Second)
 		if err != nil {
 			log.Printf("Receive error: %v", err)
+			done <- nil
 			return
 		}
-		fmt.Printf("Received %d bytes in %d parts - took %v\n",
-			recvResult.DataSize, recvResult.TotalParts, recvResult.Duration)
+		done <- received
 	}()
 
-	time.Sleep(5 * time.Second)
-	fmt.Println("Done.")
+	time.Sleep(100 * time.Millisecond)
+
+	if err := sender.Send(subject, data); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Sent %d bytes\n", len(data))
+
+	received := <-done
+	if received == nil {
+		log.Fatal("Failed to receive")
+	}
+
+	fmt.Printf("Received %d bytes\n", len(received))
+
+	if bytes.Equal(data, received) {
+		fmt.Println("OK")
+	} else {
+		fmt.Println("MISMATCH")
+	}
 }
